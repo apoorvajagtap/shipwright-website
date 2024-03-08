@@ -1,0 +1,46 @@
+name: Verify
+
+on:
+  push:
+    tags-ignore:
+      - '**'
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        path: go/src/github.com/shipwright-io/build
+    - name: Install Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21.x'
+        cache: true
+        check-latest: true
+        cache-dependency-path: go/src/github.com/shipwright-io/build
+    - name: Run golangci-lint
+      uses: golangci/golangci-lint-action@v4
+      with:
+        working-directory: go/src/github.com/shipwright-io/build
+        args: --timeout=10m
+    - name: Install Counterfeiter
+      run: |
+        make -C go/src/github.com/shipwright-io/build install-counterfeiter
+    - name: Install Spruce
+      run: |
+        make -C go/src/github.com/shipwright-io/build install-spruce
+    - name: Run verify-generate
+      run: |
+        export GOPATH="${GITHUB_WORKSPACE}"/go
+        make -C go/src/github.com/shipwright-io/build verify-generate

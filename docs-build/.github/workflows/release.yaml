@@ -1,0 +1,130 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Desired tag'
+        required: true
+      tags:
+        description: 'Previous tag'
+        required: true
+
+jobs:
+  release:
+    if: ${{ github.repository == 'shipwright-io/build' }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # To be able to get OIDC ID token to sign images.
+      contents: write  # To be able to update releases.
+      packages: write  # To be able to push images and signatures.
+      pull-requests: write # To be able to create pull requests
+    env:
+      IMAGE_HOST: ghcr.io
+      IMAGE_NAMESPACE: ${{ github.repository }}
+      TAG: ${{ github.event.inputs.release }}
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch all history, needed for release note generation.
+    - uses: actions/setup-go@v5
+      with:
+        go-version: '1.21.x'
+        cache: true
+        check-latest: true
+
+    # Install tools
+    - uses: ko-build/setup-ko@v0.6
+      with:
+        version: v0.15.2
+    - uses: sigstore/cosign-installer@v3
+
+    - name: Build Release Changelog
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        PREVIOUS_TAG: ${{ github.event.inputs.tags }}
+      run: |
+        # might not be necessary but make sure
+        chmod +x "${GITHUB_WORKSPACE}/.github/draft_release_notes.sh"
+        export GITHUB_TOKEN
+        export PREVIOUS_TAG
+        "${GITHUB_WORKSPACE}/.github/draft_release_notes.sh"
+
+    - name: Draft release
+      id: draft_release
+      uses: actions/create-release@v1
+      with:
+        release_name: "Shipwright Build release ${{ github.event.inputs.release }}"
+        tag_name: ${{ github.event.inputs.release }}
+        body_path: Changes.md
+        draft: true
+        prerelease: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Generate and upload release.yaml
+      env:
+        REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        REGISTRY_USERNAME: ${{ github.repository_owner }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        make release
+        gh release upload ${TAG} release.yaml
+        gh release upload ${TAG} sample-strategies.yaml
+
+    - name: Sign released images
+      run: |
+        grep -o "ghcr.io[^\"]*" release.yaml | xargs cosign sign --yes \
+            -a sha=${{ github.sha }} \
+            -a run_id=${{ github.run_id }} \
+            -a run_attempt=${{ github.run_attempt }}
+
+    - name: Update docs after release creation
+      env:
+        PREVIOUS_TAG: ${{ github.event.inputs.tags }}
+        NEW_TAG: ${{ github.event.inputs.release }}
+      run: |
+        # Update README.md with new tag
+
+        sed -i 's#https://github.com/shipwright-io/build/releases/download/'"$PREVIOUS_TAG"'/release.yaml#https://github.com/shipwright-io/build/releases/download/'"$NEW_TAG"'/release.yaml#g' README.md
+        sed -i 's#https://github.com/shipwright-io/build/releases/download/'"$PREVIOUS_TAG"'/sample-strategies.yaml#https://github.com/shipwright-io/build/releases/download/'"$NEW_TAG"'/sample-strategies.yaml#g' README.md
+        sed -i '/Examples @ HEAD/a | ['"$NEW_TAG"'](https://github.com/shipwright-io/build/releases/tag/'"$NEW_TAG"')    | [Docs @ '"$NEW_TAG"'](https://github.com/shipwright-io/build/tree/'"$NEW_TAG"'/docs) | [Examples @ '"$NEW_TAG"'](https://github.com/shipwright-io/build/tree/'"$NEW_TAG"'/samples) |' README.md
+
+    - name: Create Readme commits
+      run: |
+        git config user.name ${{ github.actor }}
+        git config user.email ${{ github.actor }}@users.noreply.github.com
+        git add README.md
+        git commit -m "Update Readme with new Tag ${{ github.event.inputs.release }}"
+        git clean -f
+    - name: Create Readme PR
+      uses: peter-evans/create-pull-request@9825ae65b1cb54b543b938503728b432a0176d29
+      with:
+        commit-message: Update Readme with new Tag
+        author: ${{ github.actor }} <${{ github.actor }}@users.noreply.github.com>
+        signoff: false
+        labels: |
+          kind/documentation
+        branch: update-readme-tag-refs
+        delete-branch: true
+        title: 'Update Readme with new tag'
+        body: |
+          Update README.md
+          # Changes
+
+          - Bump tag references to ${{ github.event.inputs.release }}
+
+          # Submitter Checklist
+
+          - [ ] Includes tests if functionality changed/was added
+          - [x] Includes docs if changes are user-facing
+          - [x] [Set a kind label on this PR](https://prow.k8s.io/command-help#kind)
+          - [x] Release notes block has been filled in, or marked NONE
+
+          # Release Notes
+
+          ```release-note
+          None
+          ```
+        draft: false

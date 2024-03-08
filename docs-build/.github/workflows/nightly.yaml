@@ -1,0 +1,78 @@
+name: Nightly Release
+
+on:
+  workflow_dispatch:  # Manual trigger
+  schedule:
+  - cron: '0 5 * * *' # 5 AM UTC = Midnight EST
+
+jobs:
+  nightly:
+    if: ${{ github.repository == 'shipwright-io/build' }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # To be able to get OIDC ID token to sign images.
+      contents: write  # To be able to update releases.
+      packages: write  # To be able to push images and signatures.
+
+    env:
+      IMAGE_HOST: ghcr.io
+      IMAGE_NAMESPACE: ${{ github.repository }}
+
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-go@v5
+      with:
+        go-version: '1.21.x'
+        cache: true
+        check-latest: true
+
+    # Install tools
+    - uses: ko-build/setup-ko@v0.6
+      with:
+        version: v0.15.2
+    - uses: imjasonh/setup-crane@00c9e93efa4e1138c9a7a5c594acd6c75a2fbf0c
+    - uses: sigstore/cosign-installer@v3
+
+    - name: Get current date
+      id: date
+      run: echo "date=$(date +'%Y-%m-%d-%s')" >> $GITHUB_OUTPUT
+
+    - name: Generate and upload release YAMLs
+      env:
+        REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        REGISTRY_USERNAME: ${{ github.repository_owner }}
+        TAG: "nightly-${{ steps.date.outputs.date }}"
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        make release
+
+        mv release.yaml nightly-${{ steps.date.outputs.date }}.yaml
+        gh release upload nightly nightly-${{ steps.date.outputs.date }}.yaml
+
+        mv release-debug.yaml nightly-${{ steps.date.outputs.date }}-debug.yaml
+        gh release upload nightly nightly-${{ steps.date.outputs.date }}-debug.yaml
+
+        mv sample-strategies.yaml nightly-${{ steps.date.outputs.date }}-sample-strategies.yaml
+        gh release upload nightly nightly-${{ steps.date.outputs.date }}-sample-strategies.yaml
+
+        echo ${{ steps.date.outputs.date }} > /tmp/latest.txt
+        gh release upload nightly /tmp/latest.txt --clobber
+
+    - name: Update latest tag of supporting images
+      working-directory: ./cmd
+      run: |
+        for command in *
+        do
+          crane copy "${IMAGE_HOST}/${IMAGE_NAMESPACE}/${command}:nightly-${{ steps.date.outputs.date }}" "${IMAGE_HOST}/${IMAGE_NAMESPACE}/${command}:latest"
+        done
+
+    - name: Sign released images
+      run: |
+        for f in \
+          nightly-${{ steps.date.outputs.date }}.yaml \
+          nightly-${{ steps.date.outputs.date }}-debug.yaml; do
+          grep -o "ghcr.io[^\"]*" $f | xargs cosign sign --yes \
+              -a sha=${{ github.sha }} \
+              -a run_id=${{ github.run_id }} \
+              -a run_attempt=${{ github.run_attempt }}
+        done
