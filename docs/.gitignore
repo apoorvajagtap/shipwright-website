@@ -1,0 +1,7 @@
+# node modules
+node_modules/
+
+# Hugo output
+resources/
+public/
+.hugo_build.lock
